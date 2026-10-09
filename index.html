@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VERVE: Verified Visual Search</title>
+<meta name="description" content="VERVE measures and mitigates the perception–hallucination trade-off in high-resolution visual search.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}]})"></script>
+<link rel="stylesheet" href="static/style.css?v=17">
+</head>
+<body>
+<main>
+
+<header class="hero">
+  <h1><span class="sc">Verve</span>: Verified Visual Search</h1>
+  <p class="authors">
+    Rui Xiao<sup>1,2*</sup>, Yiran Huang<sup>1,2,3*</sup>, Zeynep Akata<sup>1,2,3†</sup>, Stephan Alaniz<sup>4†</sup>
+  </p>
+  <p class="affils">
+    <sup>1</sup>Technical University of Munich &nbsp; <sup>2</sup>MCML &nbsp; <sup>3</sup>Helmholtz Munich &nbsp;
+    <sup>4</sup>LTCI, Télécom Paris, Institut Polytechnique de Paris
+    <br><span class="muted">* equal contribution &nbsp; † equal advising</span>
+  </p>
+  <nav class="links">
+    <a class="btn" href="#">Paper</a>
+    <a class="btn" href="#">Code</a>
+    <a class="btn" href="#">Benchmark</a>
+    <a class="btn" href="https://huggingface.co/collections/xiaorui638/verve-models" target="_blank" rel="noopener">Models</a>
+  </nav>
+</header>
+
+<aside class="toc">
+  <div class="toc-title">Contents</div>
+  <ol>
+    <li><a href="#tradeoff">The perception–hallucination trade-off</a></li>
+    <li><a href="#bench"><span class="sc">Verve-MCQ</span>: search, then verify</a></li>
+    <li><a href="#binary">Loss of discriminativeness</a></li>
+    <li><a href="#curation">Making negatives that are actually false</a></li>
+    <li><a href="#train"><span class="sc">Verve-Train</span>: learning to verify</a></li>
+    <li><a href="#results">Breaking the trade-off</a></li>
+    <li><a href="#transfer">Beyond visual search</a></li>
+  </ol>
+</aside>
+
+<p class="tldr"><b>Tl;dr:</b> Visual search models get better at finding small things in big images, but they also
+stop noticing when the thing they were asked about <em>isn't there</em>. We build a benchmark that pairs every search
+query with a minimally edited false-premise twin, show that state-of-the-art search methods fall <em>below their own base
+models</em> on it, and train models with GRPO to verify before they answer. Our 9B model beats Gemini-3.7-Flash
+by 13.8 points and reduces hallucination on six benchmarks without giving up perception.</p>
+
+<figure class="wide" id="teaser">
+  <img class="ta-fallback" src="static/figures/verve_teaser.webp" alt="Teaser: models answer the number on black shorts correctly but also give a number for white shorts that don't exist; VERVE-9B's thinking trace checks the premise; scatter plot of perception vs hallucination.">
+  <figcaption><b>Left:</b> Models answer perception questions but accept a simple false premise.
+  <b>Middle:</b> <span class="sc">Verve</span>-9B checks the premise before answering.
+  <b>Right:</b> <span class="sc">Verve-Train</span> improves both axes.</figcaption>
+</figure>
+
+<!-- ============================================================ -->
+<h2 id="tradeoff"><span class="num">1</span>The perception–hallucination trade-off</h2>
+
+<p>Ask someone to read <em>the number on the player's black shorts</em>, and they will zoom in and read it.
+Ask for the number on the player's <em>white</em> shorts, and they will tell you the shorts aren't white.
+Reliable visual search needs both: precise <span class="pos">perception</span> of small targets, and
+<span class="neg">verification</span> that the target described by the query actually exists.</p>
+
+<p>Recent visual search methods, both agentic (DeepEyes, Thyme) and single-pass (TreeVGR, ZwZ, Vision-OPD), have
+made large strides on the first. But the benchmarks that drive this progress assume a valid target is always present.
+Nothing checks the second, so no one has noticed that it is getting worse.</p>
+
+<!-- ============================================================ -->
+<h2 id="bench"><span class="num">2</span><span class="sc">Verve-MCQ</span>: search, then verify</h2>
+
+<p>Each <span class="sc">Verve-MCQ</span> instance is a pair of questions about one high-resolution image, sharing
+the same five options. In the <span class="pos">positive</span> query, the referring expression matches something in the
+image. In its <span class="neg">negative</span> twin, a single object, attribute, or relation is edited so it no longer
+matches anything. One option is always a <em>target denial</em> (“there is no such…”). It is wrong for the
+positive query and the only right answer for the negative one.</p>
+
+<p>Try it below. Switch between the two queries and see how each model responds.</p>
+
+<div class="widget" id="mcq-explorer">
+  <div class="tabs" role="tablist"></div>
+  <div class="mcq-body">
+    <div class="mcq-img"><img alt=""></div>
+    <div class="mcq-side">
+      <div class="seg" role="radiogroup">
+        <button data-q="pos" class="on">Positive query</button>
+        <button data-q="neg">Negative twin</button>
+      </div>
+      <p class="mcq-q"></p>
+      <ol class="mcq-opts" type="A"></ol>
+    </div>
+  </div>
+  <div class="mcq-models"></div>
+  <p class="widget-note">Paired credit is given only when a model answers <b>both</b> queries correctly.</p>
+</div>
+
+<h3>Where the edit sits matters</h3>
+<p>We parse every positive query into an object-anchored <em>referring chain</em> and edit exactly one slot in it:</p>
+$$\underbrace{(\text{obj},\,\text{attr})}_{\textsf{Target}}
+\;\underbrace{\xleftarrow{\ \text{rel}\ }(\text{obj},\,\text{attr})}_{\textsf{1-Hop}}
+\;\underbrace{\xleftarrow{\ \text{rel}\ }(\text{obj},\,\text{attr})}_{\textsf{2-Hop}}$$
+<p>For example, <em>“What type of plant is in the hanging pot to the right of the statue?”</em> is the chain
+statue → hanging pot → plant. Edits are proposed by Gemini-3-Flash and GPT-5. Two human annotators then checked all
+2,736 candidates, kept 1,759 pairs, and rewrote 617 of those by hand.</p>
+
+<p>We score with <b>paired accuracy</b>, so a model that always picks “not found” (or never does) gets nothing:</p>
+$$\text{Acc}_\text{paired} = \frac{1}{|\mathcal{P}|} \sum_{p \in \mathcal{P}}
+\mathbb{I}\!\left(\hat{y}^{+}_{p} = y^{+}_{p}\right)\,
+\mathbb{I}\!\left(\hat{y}^{-}_{p} = y^{-}_{p}\right)$$
+
+<div class="widget" id="mcq-chart">
+  <div class="widget-head">
+    <div class="widget-title">Paired accuracy on <span class="sc">Verve-MCQ</span></div>
+    <label class="select">Edit slot
+      <select></select>
+    </label>
+  </div>
+  <div class="chart"></div>
+  <div class="legend">
+    <span><i class="sw frontier"></i>Frontier</span>
+    <span><i class="sw base"></i>Base model</span>
+    <span><i class="sw prior"></i>Visual search method</span>
+    <span><i class="sw ours"></i><span class="sc">Verve</span> (ours)</span>
+    <span><i class="sw line"></i>Human (70.5) / random (4)</span>
+  </div>
+</div>
+
+<p>Even Gemini-3.7-Flash reaches only 41.5%, while humans reach 70.5%. Agentic search models land in single
+digits, and Thyme (2.7%) scores below random guessing. Every single-pass search method scores <em>below the base model it was
+fine-tuned from</em>. Accuracy also falls steadily as the edit moves from the target out to 1-hop and 2-hop
+context. Use the dropdown to see this.</p>
+
+<!-- ============================================================ -->
+<h2 id="binary"><span class="num">3</span>Loss of discriminativeness</h2>
+
+<p>A failure on a negative MCQ could have two causes. The model may be able to spot the edit on its own but overlook it
+inside a long question, or it may be unable to tell whether the edited element is there at all. To separate the two, <span class="sc">Verve-Binary</span>
+reduces each edit to a direct yes/no question (“Can you see <em>[edit]</em> in this image?”) and pairs it with the
+corresponding positive question.</p>
+
+<figure class="zoomable">
+  <img src="static/figures/Binary_benchmark.webp" alt="Verve-Binary example and averaged paired accuracy.">
+</figure>
+
+<p>The failure persists. One clear way to see it is to split accuracy by the ground-truth answer.
+Visual search methods answer <span class="pos">“yes”</span> correctly almost every time, but their accuracy when
+the right answer is <span class="neg">“no”</span> drops sharply. They have learned to assume the target exists.</p>
+
+<div class="widget" id="yes-bias">
+  <div class="widget-head">
+    <div class="widget-title">Accuracy on <span class="sc">Verve-Binary</span>, split by ground truth</div>
+    <div class="seg small" role="radiogroup"></div>
+  </div>
+  <div class="chart"></div>
+  <div class="legend">
+    <span><i class="dot pos"></i>GT = yes</span>
+    <span><i class="dot neg"></i>GT = no</span>
+    <span class="muted">Wider gap = stronger “yes” bias</span>
+  </div>
+</div>
+
+<p>We call this <b>loss of discriminativeness</b>: compared with the base model, these methods are worse at
+both accepting supported content and rejecting unsupported content. Gemini-3.7-Flash, by contrast, scores 85.7% on
+<span class="sc">Verve-Binary</span>. Its failures on <span class="sc">Verve-MCQ</span> therefore come from overlooking the edit inside the longer question, not from being unable to recognize it.</p>
+
+<!-- ============================================================ -->
+<h2 id="curation"><span class="num">4</span>Making negatives that are actually false</h2>
+
+<p>We build on the ZwZ-RL training set: 74K high-resolution images, each with a positive question and answer.
+For every positive question we synthesize a <span class="neg">negative</span> twin whose premise is false for that image.
+The hard part is making sure the premise really <em>is</em> false. A language model that edits a question can't tell
+whether its edit happens to be true in the image.</p>
+
+<p>We split the work between two models. <b>Qwen3.5-27B</b> handles everything visual (as
+<em>captioner</em> and <em>verifier</em>). <b>GPT-OSS-120B</b> handles all the language reasoning (as <em>proposer</em>
+and <em>annotator</em>) and never sees the image:</p>
+
+<ol class="steps">
+  <li><b>Dense captioning.</b> The captioner describes the image. This caption is the proposer's only view of the scene.</li>
+  <li><b>Propose–verify loop.</b> The proposer edits one entity in the question and writes a minimal yes/no check targeting
+  the edit. The verifier answers the check by looking at the image. If it answers <em>yes</em>, the edit is rejected
+  and the verifier's explanation goes back to the proposer as new visual evidence for its next try. The loop
+  stops when the verifier answers <em>no</em>, or after three iterations.</li>
+  <li><b>Annotation.</b> The annotator writes the negative's answer (“The container is not red.”) and breaks the
+  question into atomic <em>golden verification Q&amp;As</em>, 3.8 per question on average. These become the
+  reward signal for OPSV training.</li>
+</ol>
+
+<p>Watch the loop on the running example below:</p>
+
+<figure class="wide" id="pipeline">
+  <img class="pl-fallback zoomable" src="static/figures/data_curation.webp" alt="Training data construction: captioner, proposer, verifier loop, annotator.">
+  <figcaption>The propose–verify pipeline. The first edit (“basket”) is caught by the verifier and fed back. The second
+  (“red”) is confirmed false and becomes a negative question. <a href="static/figures/data_curation.webp" target="_blank">Static figure</a></figcaption>
+</figure>
+
+<p>We subsample 57K questions at a 2:1 positive-to-negative ratio (see the ablation in the paper).</p>
+
+<h2 id="train"><span class="num">5</span><span class="sc">Verve-Train</span>: learning to verify</h2>
+
+<p>We train with GRPO on the positive and negative questions together, sampling 8 responses per prompt.</p>
+
+<figure class="wide" id="trainanim">
+  <img class="pl-fallback zoomable" src="static/figures/training_reward.webp" alt="Training and reward design: policy model produces verified Q&amp;As and a final answer; a reward model computes coverage, correctness and format rewards.">
+  <figcaption><span class="sc">Verve-Train</span> in OPSV mode. Plain mode uses the default prompt and \(R = R_c\).</figcaption>
+</figure>
+
+<p>We train in two modes. <b>Plain</b> mode uses only a correctness reward \(R_c\). <b>On-policy self-verification
+(OPSV)</b> mode asks the model to first pose its own <code>&lt;check&gt;</code> questions about the premise and answer
+each with a <code>&lt;verdict&gt;</code>. Those checks are matched against a set of golden checks to compute a coverage
+reward \(R_k\). We never tell the model which questions to ask. It is rewarded only when its own checks cover the golden ones with the correct verdicts:</p>
+$$R = (1-w_f)\,R_c\,\bigl(\alpha + (1-\alpha)\,R_k\bigr) + w_f\,R_f$$
+
+<div class="widget" id="reward">
+  <div class="widget-head">
+    <div class="widget-title">Reward playground</div>
+  </div>
+  <p class="widget-q"><span class="neg-tag">negative</span> “What is the material of the <span class="neg">red</span> container holding the nuts?”
+  <span class="muted">(the container is not red)</span></p>
+  <div class="rw-grid">
+    <div>
+      <div class="rw-label">Model's checks: set each verdict</div>
+      <div class="rw-checks"></div>
+      <div class="rw-label">Final answer</div>
+      <div class="seg rw-answer">
+        <button data-a="1" class="on">“The container is not red.”</button>
+        <button data-a="0">“Plastic.”</button>
+      </div>
+      <div class="rw-sliders">
+        <label>\(\alpha\) <input type="range" min="0" max="1" step="0.05" value="0.5" data-k="alpha"><output></output></label>
+        <label>format OK <input type="checkbox" checked data-k="fmt"></label>
+      </div>
+    </div>
+    <div class="rw-out">
+      <div class="rw-row"><span>\(R_c\)</span><b data-o="rc"></b></div>
+      <div class="rw-row"><span>\(R_k\)</span><b data-o="rk"></b></div>
+      <div class="rw-row"><span>\(R_f\)</span><b data-o="rf"></b></div>
+      <div class="rw-bar"><div></div></div>
+      <div class="rw-row total"><span>\(R\)</span><b data-o="r"></b></div>
+      <p class="rw-why"></p>
+    </div>
+  </div>
+  <p class="widget-note">\(w_f = 0.1\). Getting the right check with the wrong verdict earns nothing, and checks only pay off when the final answer is
+  correct (gated by \(R_c\)), so the reward can't be gamed with good-looking checks.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="results"><span class="num">6</span>Breaking the trade-off</h2>
+
+<p>On <span class="sc">Verve-MCQ</span>, <span class="sc">Verve-Train</span> raises Qwen3.5-9B from 20.1% to 55.3%,
+13.8 points above Gemini-3.7-Flash. On 2-hop object edits it reaches 50.0%, compared with 26.2% for Gemini.</p>
+
+<p>The broader question is whether this costs perception. We evaluate on eight perception and six
+hallucination benchmarks. Prior search methods move <em>right and down</em>: they gain perception and lose hallucination
+resistance. <span class="sc">Verve</span> moves <em>right and up</em>. Hover over a point for details, or pick individual
+benchmarks for each axis.</p>
+
+<div class="widget" id="scatter">
+  <div class="widget-head">
+    <div class="widget-title">Perception vs. hallucination</div>
+    <div class="axis-pickers">
+      <label class="select">x <select data-axis="x"></select></label>
+      <label class="select">y <select data-axis="y"></select></label>
+    </div>
+  </div>
+  <div class="chart"></div>
+  <div class="legend backbone-legend"></div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="transfer"><span class="num">7</span>Beyond visual search</h2>
+
+<p>Training a model to tell supported claims from unsupported ones improves vision-language alignment in general. Without any training on
+these tasks, <span class="sc">Verve</span> improves general understanding, captioning, reward modeling, grounding, and even
+medical and video hallucination benchmarks.</p>
+
+<div class="widget" id="transfer-chart">
+  <div class="widget-head">
+    <div class="widget-title">Change vs. base model on 7 external benchmarks</div>
+    <div class="seg small" role="radiogroup"></div>
+  </div>
+  <div class="chart"></div>
+  <div class="legend">
+    <span><i class="sw prior"></i>Prior search method</span>
+    <span><i class="sw ours"></i><span class="sc">Verve</span><sub>plain</sub></span>
+    <span><i class="sw ours2"></i><span class="sc">Verve</span><sub>opsv</sub></span>
+  </div>
+</div>
+
+<h3>More examples</h3>
+<p class="muted">Click any figure to enlarge.</p>
+<div class="gallery">
+  <figure class="zoomable"><img src="static/figures/verve_mcq_qualitative.webp" loading="lazy" alt="Verve-MCQ qualitative"><figcaption><span class="sc">Verve-MCQ</span></figcaption></figure>
+  <figure class="zoomable"><img src="static/figures/verve_binary_qualitative.webp" loading="lazy" alt="Verve-Binary qualitative"><figcaption><span class="sc">Verve-Binary</span></figcaption></figure>
+  <figure class="zoomable"><img src="static/figures/hallu_qualitative.webp" loading="lazy" alt="Hallucination benchmarks qualitative"><figcaption>Hallucination benchmarks</figcaption></figure>
+  <figure class="zoomable"><img src="static/figures/crosstask_qualitative.webp" loading="lazy" alt="Cross-task qualitative"><figcaption>Cross-task transfer</figcaption></figure>
+  <figure class="zoomable"><img src="static/figures/Thinking_trace.webp" loading="lazy" alt="Thinking traces"><figcaption>OPSV thinking traces</figcaption></figure>
+  <figure class="zoomable"><img src="static/figures/Attention_analysis.webp" loading="lazy" alt="Attention analysis"><figcaption>“Tunnel vision” in attention</figcaption></figure>
+</div>
+
+<h2 id="cite">Citation</h2>
+<pre class="bibtex"><button class="copy">Copy</button><code>@article{xiao2026verve,
+  title   = {VERVE: Verified Visual Search},
+  author  = {Xiao, Rui and Huang, Yiran and Akata, Zeynep and Alaniz, Stephan},
+  journal = {arXiv preprint},
+  year    = {2026}
+}</code></pre>
+
+<footer class="muted">Page template inspired by <a href="https://www.sophielwang.com/cues">Wang et al.</a></footer>
+</main>
+
+<div id="lightbox" hidden><img alt=""></div>
+<div id="tooltip" hidden></div>
+
+<script src="static/data.js?v=17"></script>
+<script src="static/main.js?v=17"></script>
+<script src="static/teaser.js?v=17"></script>
+<script src="static/pipeline.js?v=17"></script>
+<script src="static/training.js?v=17"></script>
+</body>
+</html>
