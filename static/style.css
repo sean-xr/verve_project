@@ -312,3 +312,8 @@ ol.steps li { margin-bottom: .5em; }
 .pl-node.pulse { animation: tr-pulse 1s ease 2; }
 /* white halo so labels stay legible where they cross an arrow */
 .pl-role, .pl-elabel { paint-order: stroke; stroke: #fff; stroke-width: 5px; stroke-linejoin: round; }
+
+/* not-yet-available links */
+.btn.disabled { color: #aaa; background: #f4f3f0; border-style: dashed; cursor: default; display: inline-flex; align-items: center; gap: .4em; }
+.btn.disabled:hover { border-color: var(--rule); color: #aaa; }
+.btn.disabled small { font-size: .7em; text-transform: uppercase; letter-spacing: .05em; background: #e7e4dd; color: #888; padding: .05em .45em; border-radius: 999px; }
